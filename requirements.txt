@@ -1,0 +1,30 @@
+# BioHub Cell Tracking — GNN Solution
+# Core
+torch>=2.0.0
+torch-geometric>=2.4.0
+torch-scatter
+torch-sparse
+
+# Data
+zarr>=3.0.0
+numpy>=1.24.0
+pandas>=2.0.0
+scipy>=1.10.0
+scikit-learn>=1.3.0
+networkx>=3.0
+
+# Image Processing
+opencv-python-headless>=4.8.0
+scikit-image>=0.21.0
+
+# Configuration & Logging
+hydra-core>=1.3.0
+omegaconf>=2.3.0
+tqdm>=4.65.0
+
+# Visualization (optional, for notebooks)
+matplotlib>=3.7.0
+seaborn>=0.12.0
+
+# Testing
+pytest>=7.4.0
