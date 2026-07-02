@@ -278,23 +278,33 @@ class CellDetectorUNet(nn.Module):
 # --- Loss ---
 
 class FocalMSELoss(nn.Module):
-    """Focal MSE for extreme fg/bg imbalance in heatmaps."""
-    def __init__(self, alpha=2.0, beta=4.0):
+    """Focal MSE with explicit positive weight boost.
+    
+    Without pos_weight, the model collapses to all-zeros because
+    the ~4M background voxels dominate the ~1600 foreground voxels.
+    pos_weight=100 forces the model to actually learn the peaks.
+    """
+    def __init__(self, alpha=2.0, beta=4.0, pos_weight=100.0):
         super().__init__()
         self.alpha = alpha
         self.beta = beta
+        self.pos_weight = pos_weight
 
     def forward(self, pred, target):
         pred = pred.float()
         target = target.float()
         pos_mask = (target >= 0.01)
-        pos_weight = (1 - pred) ** self.alpha
+
+        pw = (1 - pred) ** self.alpha
         pos_loss = torch.where(
-            pos_mask, pos_weight * (pred - target) ** 2, torch.zeros_like(pred))
-        neg_weight = pred ** self.alpha * (1 - target) ** self.beta
+            pos_mask, pw * (pred - target) ** 2, torch.zeros_like(pred))
+
+        nw = pred ** self.alpha * (1 - target) ** self.beta
         neg_loss = torch.where(
-            ~pos_mask, neg_weight * pred ** 2, torch.zeros_like(pred))
-        return (pos_loss.sum() + neg_loss.sum()) / max(pos_mask.sum().item(), 1)
+            ~pos_mask, nw * pred ** 2, torch.zeros_like(pred))
+
+        n_pos = max(pos_mask.sum().item(), 1)
+        return (self.pos_weight * pos_loss.sum() + neg_loss.sum()) / n_pos
 
 
 # --- Utilities ---
@@ -497,11 +507,11 @@ print(f"Local disk: {disk.free / 1e9:.1f} GB remaining")
 
 # %%
 N_EPOCHS = 30
-LR = 1e-3
+LR = 3e-3               # Higher LR to escape all-zeros local minimum
 EVAL_EVERY = 5
 SIGMA_VOXELS = (2.0, 4.0, 4.0)
-PEAK_THRESHOLD = 0.3
-FRAMES_PER_EPOCH = 800  # Subsample for speed (3680 total, see all over ~5 epochs)
+PEAK_THRESHOLD = 0.05   # Low threshold — model peaks start weak
+FRAMES_PER_EPOCH = 800   # Subsample for speed (3680 total, see all over ~5 epochs)
 
 SAVE_DIR = "/content/drive/MyDrive/kaggle_biohub/checkpoints"
 os.makedirs(SAVE_DIR, exist_ok=True)
@@ -665,7 +675,66 @@ print(f"Training complete! Best validation recall: {best_val_recall:.1%}")
 print(f"{'='*60}")
 
 # %% [markdown]
-# ## 5. Training Curves
+# ## 5. Heatmap Diagnostic
+#
+# Check what the model is actually predicting.
+
+# %%
+# === DIAGNOSTIC: What does the model output look like? ===
+model.eval()
+with torch.no_grad():
+    for vi in range(min(3, len(val_frames))):
+        fi = val_frames[vi]
+        loader = ZarrLoader(fi["zarr_path"])
+        frame = loader.get_frame(fi["frame_idx"])
+        inp = torch.tensor(normalize_volume(frame), dtype=torch.float32
+                          ).unsqueeze(0).unsqueeze(0).to(device)
+        pred = model(inp)
+        hm = pred[0, 0].cpu().numpy()
+
+        gt_hm = make_gaussian_heatmap(frame.shape, fi["centroids"], SIGMA_VOXELS)
+        peaks = extract_peaks(hm, threshold=PEAK_THRESHOLD)
+
+        print(f"\n--- Val frame {vi} ({fi['name']} t={fi['frame_idx']}) ---")
+        print(f"  Heatmap: min={hm.min():.6f}, max={hm.max():.6f}, "
+              f"mean={hm.mean():.6f}")
+        print(f"  GT centroids: {len(fi['centroids'])}")
+        print(f"  Peaks found (thr={PEAK_THRESHOLD}): {len(peaks)}")
+        if peaks:
+            print(f"  Top 5 confs: {[f'{p[3]:.4f}' for p in peaks[:5]]}")
+
+        del inp, pred, frame
+        torch.cuda.empty_cache()
+
+# Visualize one example
+import matplotlib.pyplot as plt
+
+fi = val_frames[0]
+loader = ZarrLoader(fi["zarr_path"])
+frame = loader.get_frame(fi["frame_idx"])
+with torch.no_grad():
+    inp = torch.tensor(normalize_volume(frame), dtype=torch.float32
+                      ).unsqueeze(0).unsqueeze(0).to(device)
+    hm = model(inp)[0, 0].cpu().numpy()
+
+gt_hm = make_gaussian_heatmap(frame.shape, fi["centroids"], SIGMA_VOXELS)
+
+# Show mid-Z slice
+mid_z = frame.shape[0] // 2
+fig, axes = plt.subplots(1, 3, figsize=(18, 5))
+axes[0].imshow(normalize_volume(frame)[mid_z], cmap='gray')
+axes[0].set_title(f"Input (z={mid_z})")
+axes[1].imshow(gt_hm[mid_z], cmap='hot', vmin=0, vmax=1)
+axes[1].set_title(f"GT Heatmap (z={mid_z})")
+axes[2].imshow(hm[mid_z], cmap='hot', vmin=0, vmax=max(hm.max(), 0.01))
+axes[2].set_title(f"Predicted (max={hm.max():.4f})")
+plt.tight_layout()
+plt.show()
+del inp, frame
+torch.cuda.empty_cache()
+
+# %% [markdown]
+# ## 6. Training Curves
 
 # %%
 import matplotlib.pyplot as plt
